@@ -1,5 +1,8 @@
 import asyncio
 import os
+import argparse
+import json
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Literal
 
@@ -29,6 +32,45 @@ class GroceryCart(BaseModel):
     items: list[GroceryItem] = Field(
         default_factory=list, description="All grocery items found or substituted."
     )
+
+
+class AvailableStores(BaseModel):
+    """A list of grocery stores available in the user's area on Instacart."""
+    stores: list[str] = Field(..., description="A list of 3 to 5 unique grocery store names (e.g., 'Kroger', 'Safeway', 'Aldi').")
+
+
+async def get_available_stores():
+    """
+    Feature: Dynamic Store Selection (Intelligence)
+    Uses the agent to identify available local stores on Instacart.
+    """
+    print("🧠 Fetching available stores dynamically from Instacart...")
+    browser = Browser(cdp_url="http://localhost:9222")
+    llm = ChatBrowserUse()
+
+    task = """
+    Navigate to Instacart's homepage and identify a diverse list of 3 to 5 popular grocery stores available in the area.
+    Return only the names of these stores in the output structure.
+    Site: https://www.instacart.com/
+    """
+
+    agent = Agent(
+        browser=browser,
+        llm=llm,
+        task=task,
+        output_model_schema=AvailableStores,
+    )
+
+    try:
+        result = await agent.run()
+        if result and result.structured_output:
+            print(f"✅ Stores fetched: {', '.join(result.structured_output.stores)}")
+            return result.structured_output.stores
+        print("❌ Could not dynamically fetch stores.")
+        return []
+    except Exception as e:
+        print(f"🛑 Error during store fetching: {e}")
+        return []
 
 
 async def add_to_cart(store: str, items: list[str], preference: str):
@@ -79,30 +121,63 @@ async def add_to_cart(store: str, items: list[str], preference: str):
     # Run the agent
     result = await agent.run()
 
-    # The result may contain structured_output (a GroceryCart instance) or be None on failure
     if result and result.structured_output:
         return result.structured_output
     return None
 
 
+def save_results_to_json(cart: GroceryCart):
+    """
+    Feature: Save Results to JSON (Persistence)
+    Saves the final best cart results to a timestamped JSON file.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"best_cart_results_{timestamp}.json"
+
+    # Use model_dump() for Pydantic V2 or dict() for Pydantic V1
+    # We use model_dump() as it is the standard for modern Pydantic versions
+    data = cart.model_dump(mode='json')
+
+    try:
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        print(f"\n✅ Results successfully saved to: {filename}")
+    except Exception as e:
+        print(f"\n❌ Error saving results to JSON file: {e}")
+
+
 if __name__ == "__main__":
-    # --- User Input ---
-    items_input = input(
-        "What items would you like to add to cart (comma-separated, e.g., milk, eggs, bread)? "
-    ).strip()
-    preference = input(
-        "What is your shopping preference (e.g., 'organic', 'gluten-free', 'cheapest')? "
-    ).strip() or "cheapest"
+    # --- Feature: Command Line Arguments (Usability) ---
+    parser = argparse.ArgumentParser(
+        description="Automated multi-store grocery shopper with price comparison and preference logic."
+    )
+    parser.add_argument(
+        "--items",
+        type=str,
+        default="milk, eggs, bread",
+        help="Comma-separated list of items to buy (e.g., 'apples, cheese, cereal')."
+    )
+    parser.add_argument(
+        "--preference",
+        type=str,
+        default="cheapest",
+        help="Shopping preference (e.g., 'organic', 'gluten-free', 'cheapest')."
+    )
+    args = parser.parse_args()
 
-    if not items_input:
-        items = ["milk", "eggs", "bread"]
-        print(f"Using default items: {items}")
-    else:
-        items = [item.strip() for item in items_input.split(",")]
+    # Process arguments
+    items = [item.strip() for item in args.items.split(",")]
+    preference = args.preference.strip()
 
-    # --- Multi-Store Comparison Setup ---
-    # Define the stores we want to compare on Instacart
-    STORES = ["Kroger", "Safeway", "Aldi"]
+    # --- Feature: Dynamic Store Selection (Intelligence) ---
+    # Fetch stores first
+    STORES = asyncio.run(get_available_stores())
+
+    # Fallback if dynamic fetch fails
+    if not STORES:
+        STORES = ["Kroger", "Safeway", "Aldi"]
+        print("⚠️ Dynamic store fetch failed or returned empty list. Defaulting to: Kroger, Safeway, Aldi.")
+
     all_carts: list[GroceryCart] = []
 
     print(f"\nSearching for items: {', '.join(items)} with preference: '{preference}'")
@@ -116,8 +191,7 @@ if __name__ == "__main__":
             cart = asyncio.run(add_to_cart(store, items, preference))
 
             if cart:
-                # Re-calculate total cost in Python to ensure accuracy,
-                # as the LLM's calculation might sometimes be slightly off.
+                # Re-calculate total cost in Python to ensure accuracy
                 cart.total_cost = sum(item.price for item in cart.items)
                 all_carts.append(cart)
                 print(f"--- ✅ {store} Cart Total: ${cart.total_cost:.2f} ---\n")
@@ -169,3 +243,6 @@ if __name__ == "__main__":
                  print(f"{notes_str}")
             print(f"URL: {item.url}")
             print(f"{'-' * 70}")
+            
+        # --- Feature: Save Results to JSON (Persistence) ---
+        save_results_to_json(best_cart)
